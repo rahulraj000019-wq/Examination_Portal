@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "teacher"] }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Exam": {
+      "title": "Exam",
+      "description": "Examination metadata and settings",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "duration": { "type": "integer", "description": "Duration in minutes" },
+        "password": { "type": "string" },
+        "creatorUid": { "type": "string" }
+      },
+      "required": ["title", "startTime", "endTime", "duration", "creatorUid"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Exam question (MCQ, Subjective, or Coding)",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string" },
+        "type": { "type": "string", "enum": ["mcq", "subjective", "coding"] },
+        "text": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "correctAnswer": { "type": "string" },
+        "testCases": { "type": "array", "items": { "type": "object" } },
+        "points": { "type": "integer" }
+      },
+      "required": ["examId", "type", "text", "points"]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "Student exam submission",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string" },
+        "studentUid": { "type": "string" },
+        "status": { "type": "string", "enum": ["started", "submitted"] },
+        "startTime": { "type": "string", "format": "date-time" },
+        "submitTime": { "type": "string", "format": "date-time" },
+        "answers": { "type": "object" },
+        "marks": { "type": "integer" }
+      },
+      "required": ["examId", "studentUid", "status"]
+    },
+    "ProctoringLog": {
+      "title": "ProctoringLog",
+      "description": "Logs of suspicious activity during an exam",
+      "type": "object",
+      "properties": {
+        "submissionId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "type": { "type": "string", "enum": ["tab-switch", "face-missing", "multiple-faces", "looking-away"] },
+        "evidence": { "type": "string" }
+      },
+      "required": ["submissionId", "timestamp", "type"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": { "schema": "User", "description": "User profiles" },
+    "/exams/{examId}": { "schema": "Exam", "description": "Exams" },
+    "/exams/{examId}/questions/{questionId}": { "schema": "Question", "description": "Questions for an exam" },
+    "/submissions/{submissionId}": { "schema": "Submission", "description": "Exam submissions" },
+    "/submissions/{submissionId}/logs/{logId}": { "schema": "ProctoringLog", "description": "Proctoring logs for a submission" }
+  }
+}
