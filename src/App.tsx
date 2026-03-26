@@ -23,8 +23,9 @@ import {
   serverTimestamp,
   getDocs
 } from 'firebase/firestore';
-import { db, auth } from './firebase';
-import { UserProfile, UserRole, Exam, Question, Submission, ProctoringLog, QuestionType, ProctoringLogType } from './types';
+import { db, auth, handleFirestoreError, testConnection } from './firebase';
+import { UserProfile, UserRole, Exam, Question, Submission, ProctoringLog, QuestionType, ProctoringLogType, OperationType } from './types';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { 
   Layout, 
   Shield, 
@@ -54,58 +55,7 @@ import Webcam from 'react-webcam';
 import { FaceMesh } from '@mediapipe/face_mesh';
 import * as cam from '@mediapipe/camera_utils';
 
-// --- Error Handling ---
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
+const ADMIN_EMAIL = "rahulraj000019@gmail.com";
 
 // --- Components ---
 
@@ -169,7 +119,7 @@ function PortalAuth({ profile, onAuthenticated, showToast }: { profile: UserProf
       
       setLoading(true);
       try {
-        await updateDoc(doc(db, 'users', profile.uid), { portalPassword: password });
+        await updateDoc(doc(db, 'users', profile.uid), { portalPassword: password }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `users/${profile.uid}`));
         showToast('Portal password set successfully');
         onAuthenticated();
       } catch (e) {
@@ -270,7 +220,14 @@ export default function App() {
   const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
   const [activeSubmission, setActiveSubmission] = useState<Submission | null>(null);
   const [isPortalAuthenticated, setIsPortalAuthenticated] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<{ success: boolean, message: string } | null>(null);
   const [loginRole, setLoginRole] = useState<UserRole | null>(null);
+  const loginRoleRef = useRef<UserRole | null>(null);
+
+  useEffect(() => {
+    loginRoleRef.current = loginRole;
+  }, [loginRole]);
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
@@ -286,17 +243,40 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
+  const checkConnection = async () => {
+    const status = await testConnection();
+    setConnectionStatus(status);
+    if (status.success) {
+      showToast(status.message, 'success');
+    } else {
+      showToast(status.message, 'error');
+    }
+  };
+
+  useEffect(() => {
+    checkConnection();
+  }, []);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setView('dashboard'); // Reset view on auth change
       if (u) {
         const docRef = doc(db, 'users', u.uid);
-        const docSnap = await getDoc(docRef);
+        const docSnap = await getDoc(docRef).catch(e => handleFirestoreError(e, OperationType.GET, `users/${u.uid}`));
         if (docSnap.exists()) {
           const p = docSnap.data() as UserProfile;
-          setProfile(p);
+          let currentProfile = p;
           
+          // If the user is the admin and they are currently a student, 
+          // let's default them to teacher if they haven't explicitly chosen student in this session.
+          if (u.email === ADMIN_EMAIL && p.role === 'student' && (loginRoleRef.current === 'teacher' || !loginRoleRef.current)) {
+            await updateDoc(docRef, { role: 'teacher' }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `users/${u.uid}`));
+            currentProfile = { ...p, role: 'teacher' };
+            showToast('Admin access: Switched to Teacher mode');
+          }
+          setProfile(currentProfile);
+
           // If user logged in via Email/Password, skip secondary portal auth
           // as they already entered a password.
           const isEmailPassword = u.providerData.some(prov => prov.providerId === 'password');
@@ -310,15 +290,19 @@ export default function App() {
             setIsPortalAuthenticated(false);
           }
         } else {
-          // Default to student if no profile
-          const newProfile: UserProfile = {
+          // Default to teacher for admin email, otherwise use loginRole or student
+          const initialRole = u.email === ADMIN_EMAIL ? 'teacher' : (loginRoleRef.current || 'student');
+          
+          const newProfile: any = {
             uid: u.uid,
             email: u.email || '',
-            name: u.displayName || 'User',
-            role: 'student'
+            name: u.displayName || (u.email ? u.email.split('@')[0] : 'User'),
+            role: initialRole,
+            createdAt: serverTimestamp(),
+            portalPassword: null
           };
-          await setDoc(docRef, newProfile);
-          setProfile(newProfile);
+          await setDoc(docRef, newProfile).catch(e => handleFirestoreError(e, OperationType.WRITE, `users/${u.uid}`));
+          setProfile(newProfile as UserProfile);
           
           const isEmailPassword = u.providerData.some(prov => prov.providerId === 'password');
           setIsPortalAuthenticated(isEmailPassword);
@@ -335,22 +319,8 @@ export default function App() {
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
     try {
-      const result = await signInWithPopup(auth, provider);
-      if (loginRole && result.user) {
-        // If it's a new user, we want to ensure they get the role they selected
-        const docRef = doc(db, 'users', result.user.uid);
-        const docSnap = await getDoc(docRef);
-        if (!docSnap.exists()) {
-          const newProfile: UserProfile = {
-            uid: result.user.uid,
-            email: result.user.email || '',
-            name: result.user.displayName || 'User',
-            role: loginRole
-          };
-          await setDoc(docRef, newProfile);
-          setProfile(newProfile);
-        }
-      }
+      await signInWithPopup(auth, provider);
+      // Profile creation is now handled in onAuthStateChanged for consistency
     } catch (error) {
       console.error('Login failed', error);
       showToast('Google login failed', 'error');
@@ -373,13 +343,14 @@ export default function App() {
     try {
       if (authMode === 'signup') {
         const result = await createUserWithEmailAndPassword(auth, email, password);
+        const initialRole = email === ADMIN_EMAIL ? 'teacher' : (loginRoleRef.current || 'student');
         const newProfile: UserProfile = {
           uid: result.user.uid,
           email: email,
           name: email.split('@')[0],
-          role: loginRole || 'student'
+          role: initialRole
         };
-        await setDoc(doc(db, 'users', result.user.uid), newProfile);
+        await setDoc(doc(db, 'users', result.user.uid), newProfile).catch(e => handleFirestoreError(e, OperationType.WRITE, `users/${result.user.uid}`));
         setProfile(newProfile);
         showToast('Account created successfully! Please log in with your new credentials.', 'success');
         
@@ -398,19 +369,18 @@ export default function App() {
         message = 'This email is already registered. Switching to login mode...';
         setAuthMode('login');
       } else if (error.code === 'auth/operation-not-allowed') {
-        message = 'Email/Password sign-in is not enabled.';
+        message = 'Email/Password sign-in is not enabled in Firebase Console.';
         setAuthSetupError(true);
-      } else if (error.code === 'auth/invalid-credential') {
-        message = 'Invalid email or password. If you don\'t have an account, please sign up first.';
-      } else if (error.code === 'auth/user-not-found') {
-        message = 'No account found with this email. Please sign up first.';
-        setAuthMode('signup');
-      } else if (error.code === 'auth/wrong-password') {
-        message = 'Incorrect password. Please try again or reset your password.';
+      } else if (error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found') {
+        message = 'Invalid email or password. Please check your credentials or sign up.';
       } else if (error.code === 'auth/weak-password') {
         message = 'Password is too weak. Please use at least 6 characters.';
       } else if (error.code === 'auth/too-many-requests') {
         message = 'Too many failed attempts. Please try again later.';
+      } else if (error.message?.includes('Missing or insufficient permissions')) {
+        message = 'Permission denied. Please ensure you have the correct access.';
+      } else {
+        message = error.message || 'An unexpected authentication error occurred.';
       }
       setAuthError(message);
       showToast(message, 'error');
@@ -429,6 +399,10 @@ export default function App() {
       let message = 'Failed to send reset email';
       if (error.code === 'auth/user-not-found') {
         message = 'No account found with this email.';
+      } else if (error.code === 'auth/invalid-email') {
+        message = 'Invalid email address format.';
+      } else {
+        message = error.message || message;
       }
       showToast(message, 'error');
     }
@@ -437,14 +411,14 @@ export default function App() {
   const toggleRole = async () => {
     if (!user || !profile) return;
     // Only allow admin to toggle roles freely for themselves
-    const isAdmin = profile.email === "rahulraj000019@gmail.com";
+    const isAdmin = profile.email === ADMIN_EMAIL;
     if (!isAdmin) {
       showToast('Only administrators can change roles', 'error');
       return;
     }
     const newRole = profile.role === 'student' ? 'teacher' : 'student';
     const docRef = doc(db, 'users', user.uid);
-    await updateDoc(docRef, { role: newRole });
+    await updateDoc(docRef, { role: newRole }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `users/${user.uid}`));
     setProfile({ ...profile, role: newRole });
     showToast(`Switched to ${newRole} mode`);
   };
@@ -583,55 +557,143 @@ export default function App() {
     }
 
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+      <div className="min-h-screen relative overflow-hidden flex flex-col items-center justify-center p-4">
+        {/* Full Page Background Video */}
+        <div className="absolute inset-0 z-0">
+          <video 
+            autoPlay 
+            loop 
+            muted 
+            playsInline
+            className="w-full h-full object-cover opacity-40"
+          >
+            <source src="https://assets.mixkit.co/videos/preview/mixkit-digital-animation-of-a-human-brain-4010-large.mp4" type="video/mp4" />
+          </video>
+          <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px]" />
+        </div>
+
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-4xl w-full text-center space-y-12"
+          className="relative z-10 max-w-5xl w-full text-center space-y-12"
         >
-          <div className="space-y-4">
-            <div className="flex justify-center">
-              <div className="w-20 h-20 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-200">
-                <Shield className="text-white" size={40} />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <h1 className="text-5xl font-bold text-slate-900 tracking-tight">ExamPortal AI</h1>
-              <p className="text-slate-500 text-xl">Secure, AI-powered examinations for the modern era.</p>
+          <div className="space-y-8">
+            {/* Central Content: Avatar & Hit Line */}
+            <div className="flex flex-col items-center text-center space-y-6">
+              <motion.div 
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ delay: 0.2 }}
+                className="relative"
+              >
+                <div className="w-28 h-28 rounded-full border-4 border-white/20 p-1 backdrop-blur-md">
+                  <img 
+                    src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&h=200&q=80" 
+                    alt="AI Assistant Avatar" 
+                    className="w-full h-full rounded-full object-cover shadow-2xl"
+                    referrerPolicy="no-referrer"
+                  />
+                </div>
+                <motion.div 
+                  animate={{ scale: [1, 1.2, 1] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                  className="absolute -bottom-1 -right-1 w-6 h-6 bg-emerald-500 border-2 border-slate-900 rounded-full"
+                />
+              </motion.div>
+
+              <motion.div
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ delay: 0.4 }}
+                className="space-y-4"
+              >
+                <h1 className="text-6xl font-black text-white tracking-tighter leading-none drop-shadow-2xl">
+                  EXAMPORTAL <span className="text-indigo-400">AI</span>
+                </h1>
+                <h2 className="text-3xl font-bold text-indigo-100/90 tracking-tight">
+                  THE FUTURE OF <span className="text-indigo-400">INTELLIGENT</span> EXAMS
+                </h2>
+                <p className="text-indigo-100/70 text-lg font-medium max-w-2xl mx-auto italic">
+                  "Integrity meets Innovation. Your AI-powered academic journey starts here."
+                </p>
+              </motion.div>
             </div>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-8 text-left">
+          <div className="grid md:grid-cols-2 gap-8 text-left max-w-4xl mx-auto">
             {/* Student Login Card */}
-            <motion.div whileHover={{ y: -5 }} className="h-full">
-              <Card className="p-8 h-full flex flex-col border-2 border-transparent hover:border-indigo-100 transition-all">
-                <div className="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center mb-6">
-                  <UserIcon className="text-indigo-600" size={24} />
+            <motion.div 
+              whileHover={{ y: -8, scale: 1.02 }} 
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.6 }}
+              className="h-full"
+            >
+              <Card className="p-8 h-full flex flex-col bg-white/10 backdrop-blur-xl border-white/10 hover:bg-white/15 transition-all group">
+                <div className="w-14 h-14 bg-indigo-500/20 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-indigo-500/30 transition-colors">
+                  <UserIcon className="text-indigo-400" size={28} />
                 </div>
-                <h2 className="text-2xl font-bold text-slate-900 mb-2">Student Portal</h2>
-                <p className="text-slate-500 mb-8 flex-1">Take exams, view your results, and track your academic progress in a secure environment.</p>
-                <Button onClick={() => setLoginRole('student')} className="w-full py-4" icon={UserIcon}>
+                <h2 className="text-2xl font-bold text-white mb-2">Student Portal</h2>
+                <p className="text-indigo-100/60 mb-8 flex-1">Take exams, view your results, and track your academic progress in a secure environment.</p>
+                <Button onClick={() => setLoginRole('student')} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-900/20" icon={UserIcon}>
                   Login as Student
                 </Button>
               </Card>
             </motion.div>
 
             {/* Teacher Login Card */}
-            <motion.div whileHover={{ y: -5 }} className="h-full">
-              <Card className="p-8 h-full flex flex-col border-2 border-transparent hover:border-indigo-100 transition-all">
-                <div className="w-12 h-12 bg-emerald-50 rounded-xl flex items-center justify-center mb-6">
-                  <Shield className="text-emerald-600" size={24} />
+            <motion.div 
+              whileHover={{ y: -8, scale: 1.02 }}
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.7 }}
+              className="h-full"
+            >
+              <Card className="p-8 h-full flex flex-col bg-white/10 backdrop-blur-xl border-white/10 hover:bg-white/15 transition-all group">
+                <div className="w-14 h-14 bg-emerald-500/20 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-emerald-500/30 transition-colors">
+                  <Shield className="text-emerald-400" size={28} />
                 </div>
-                <h2 className="text-2xl font-bold text-slate-900 mb-2">Teacher Portal</h2>
-                <p className="text-slate-500 mb-8 flex-1">Create exams, manage student submissions, and monitor proctoring logs with AI assistance.</p>
-                <Button onClick={() => setLoginRole('teacher')} variant="secondary" className="w-full py-4 border-emerald-200 text-emerald-700 hover:bg-emerald-50" icon={Shield}>
+                <h2 className="text-2xl font-bold text-white mb-2">Teacher Portal</h2>
+                <p className="text-indigo-100/60 mb-8 flex-1">Create exams, manage student submissions, and monitor proctoring logs with AI assistance.</p>
+                <Button onClick={() => setLoginRole('teacher')} variant="secondary" className="w-full py-4 bg-white/10 border-white/20 text-white hover:bg-white/20" icon={Shield}>
                   Login as Teacher
                 </Button>
               </Card>
             </motion.div>
           </div>
 
-          <p className="text-sm text-slate-400">
+          {/* AI Features Showcase */}
+          <div className="pt-12 space-y-12">
+            <div className="text-center">
+              <h3 className="text-3xl font-bold text-white">AI-Powered Excellence</h3>
+              <p className="text-indigo-100/60 mt-2">Transforming the examination experience with cutting-edge technology.</p>
+            </div>
+            
+            <div className="grid sm:grid-cols-3 gap-6">
+              {[
+                { title: 'Smart Proctoring', desc: 'Real-time face and tab tracking', img: 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=400&q=80' },
+                { title: 'Instant Insights', desc: 'Automated grading and feedback', img: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=400&q=80' },
+                { title: 'Secure Environment', desc: 'Encrypted data and portal locks', img: 'https://images.unsplash.com/photo-1550751827-4bd374c3f58b?auto=format&fit=crop&w=400&q=80' }
+              ].map((feature, i) => (
+                <motion.div 
+                  key={i}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.8 + (i * 0.1) }}
+                  className="group cursor-default"
+                >
+                  <div className="relative h-40 rounded-2xl overflow-hidden mb-4 shadow-lg group-hover:shadow-indigo-500/20 transition-all border border-white/10">
+                    <img src={feature.img} alt={feature.title} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500 opacity-80 group-hover:opacity-100" referrerPolicy="no-referrer" />
+                    <div className="absolute inset-0 bg-indigo-950/40 group-hover:bg-indigo-950/0 transition-colors" />
+                  </div>
+                  <h4 className="font-bold text-white">{feature.title}</h4>
+                  <p className="text-sm text-indigo-100/50">{feature.desc}</p>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-sm text-indigo-100/30 pb-8">
             By signing in, you agree to our terms of service and academic integrity policies.
           </p>
         </motion.div>
@@ -676,11 +738,33 @@ export default function App() {
         </div>
         
         <div className="flex items-center gap-6">
-          {profile?.email === "rahulraj000019@gmail.com" && (
+          {profile?.email === ADMIN_EMAIL && (
+            <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 rounded-full border border-amber-100">
+              <Shield size={14} className="fill-amber-600/10" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Administrator</span>
+            </div>
+          )}
+
+          <div 
+            onClick={checkConnection}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border cursor-pointer transition-all hover:scale-105 ${
+              connectionStatus?.success 
+                ? 'bg-emerald-50 text-emerald-600 border-emerald-100' 
+                : 'bg-rose-50 text-rose-600 border-rose-100'
+            }`}
+          >
+            <div className={`w-2 h-2 rounded-full ${connectionStatus?.success ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+            <span className="text-[10px] font-bold uppercase tracking-wider">
+              {connectionStatus?.success ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+
+          {profile?.email === ADMIN_EMAIL && (
             <Button variant="ghost" size="sm" onClick={toggleRole} className="text-xs text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50">
               Switch to {profile?.role === 'student' ? 'Teacher' : 'Student'}
             </Button>
           )}
+
           <div className="flex items-center gap-3 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-100">
             <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-sm">
               {profile?.name?.[0]}
@@ -763,7 +847,7 @@ function ProfileEditor({ profile, onClose, onUpdate, showToast }: { profile: Use
         }
         updates.portalPassword = newPortalPassword;
       }
-      await updateDoc(doc(db, 'users', profile.uid), updates);
+      await updateDoc(doc(db, 'users', profile.uid), updates).catch(e => handleFirestoreError(e, OperationType.UPDATE, `users/${profile.uid}`));
       onUpdate({ ...profile, ...updates });
       showToast('Profile updated successfully');
       onClose();
@@ -860,7 +944,7 @@ function Dashboard({ profile, onSelectExam, onCreateExam, onViewResult }: { prof
       const examList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Exam));
       setExams(examList);
       setLoading(false);
-    });
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'exams'));
     return unsubscribe;
   }, [profile.uid, profile.role]);
 
@@ -874,7 +958,7 @@ function Dashboard({ profile, onSelectExam, onCreateExam, onViewResult }: { prof
           subMap[data.examId] = { id: doc.id, ...data };
         });
         setSubmissions(subMap);
-      });
+      }, (e) => handleFirestoreError(e, OperationType.LIST, 'submissions'));
       return unsubscribe;
     }
   }, [profile.uid, profile.role]);
@@ -1068,28 +1152,53 @@ function ExamCreator({ onCancel, showToast }: { onCancel: () => void, showToast:
 
   const handleSubmit = async () => {
     if (!title || !startTime || !endTime) return showToast('Please fill required fields', 'error');
+    if (!auth.currentUser) return showToast('You must be logged in', 'error');
+    if (questions.length === 0) return showToast('Please add at least one question', 'error');
+    
     setLoading(true);
     try {
-      const examRef = await addDoc(collection(db, 'exams'), {
+      const examData = {
         title,
-        description: desc,
+        description: desc || '',
         startTime,
         endTime,
-        duration,
-        password,
-        creatorUid: auth.currentUser?.uid,
+        duration: Math.floor(Number(duration)) || 60,
+        password: password || '',
+        creatorUid: auth.currentUser.uid,
         createdAt: serverTimestamp()
-      });
+      };
+
+      console.log('Publishing exam:', examData);
+
+      const examRef = await addDoc(collection(db, 'exams'), examData)
+        .catch(e => {
+          console.error('Error creating exam doc:', e);
+          return handleFirestoreError(e, OperationType.CREATE, 'exams');
+        });
+
+      if (!examRef) throw new Error('Failed to get exam reference');
 
       for (const q of questions) {
-        await addDoc(collection(db, 'exams', examRef.id, 'questions'), {
-          ...q,
-          examId: examRef.id
-        });
+        const questionData = {
+          examId: examRef.id,
+          type: q.type,
+          text: q.text || '',
+          points: Math.floor(Number(q.points)) || 0,
+          options: q.options || [],
+          correctAnswer: q.correctAnswer || '',
+          testCases: q.testCases || []
+        };
+        await addDoc(collection(db, 'exams', examRef.id, 'questions'), questionData)
+          .catch(e => {
+            console.error('Error creating question doc:', e);
+            return handleFirestoreError(e, OperationType.CREATE, `exams/${examRef.id}/questions`);
+          });
       }
+      showToast('Exam published successfully!', 'success');
       onCancel();
     } catch (e) {
-      console.error(e);
+      console.error('Exam creation failed:', e);
+      showToast('Failed to publish exam. Please check your inputs.', 'error');
     } finally {
       setLoading(false);
     }
@@ -1211,14 +1320,18 @@ function ExamManager({ exam, onBack, showToast }: { exam: Exam, onBack: () => vo
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setSubmissions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Submission)));
       setLoading(false);
-    });
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'submissions'));
     return unsubscribe;
   }, [exam.id]);
 
   useEffect(() => {
     const fetchQuestions = async () => {
-      const qSnap = await getDocs(collection(db, 'exams', exam.id, 'questions'));
-      setQuestions(qSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question)));
+      try {
+        const qSnap = await getDocs(collection(db, 'exams', exam.id, 'questions')).catch(e => handleFirestoreError(e, OperationType.LIST, `exams/${exam.id}/questions`));
+        setQuestions(qSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question)));
+      } catch (e) {
+        console.error(e);
+      }
     };
     fetchQuestions();
   }, [exam.id]);
@@ -1231,7 +1344,7 @@ function ExamManager({ exam, onBack, showToast }: { exam: Exam, onBack: () => vo
           .map(doc => ({ id: doc.id, ...doc.data() } as ProctoringLog))
           .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
         setLogs(sortedLogs);
-      });
+      }, (e) => handleFirestoreError(e, OperationType.LIST, `submissions/${selectedSub.id}/logs`));
       setRemark(selectedSub.remark || '');
       return unsubscribe;
     }
@@ -1251,7 +1364,7 @@ function ExamManager({ exam, onBack, showToast }: { exam: Exam, onBack: () => vo
 
   const updateResult = async (subId: string, result: 'pass' | 'fail') => {
     try {
-      await updateDoc(doc(db, 'submissions', subId), { result, remark });
+      await updateDoc(doc(db, 'submissions', subId), { result, remark }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `submissions/${subId}`));
       showToast(`Student marked as ${result}`);
       if (selectedSub?.id === subId) {
         setSelectedSub(prev => prev ? { ...prev, result, remark } : null);
@@ -1278,7 +1391,7 @@ function ExamManager({ exam, onBack, showToast }: { exam: Exam, onBack: () => vo
       await updateDoc(doc(db, 'submissions', selectedSub.id), { 
         gradedQuestions: newGraded,
         marks: newMarks
-      });
+      }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `submissions/${selectedSub.id}`));
       setSelectedSub({ ...selectedSub, gradedQuestions: newGraded, marks: newMarks });
       showToast(isCorrect ? 'Question marked as correct' : 'Question marked as incorrect');
     } catch (e) {
@@ -1289,7 +1402,7 @@ function ExamManager({ exam, onBack, showToast }: { exam: Exam, onBack: () => vo
   const saveRemark = async () => {
     if (!selectedSub) return;
     try {
-      await updateDoc(doc(db, 'submissions', selectedSub.id), { remark });
+      await updateDoc(doc(db, 'submissions', selectedSub.id), { remark }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `submissions/${selectedSub.id}`));
       showToast('Remark saved successfully');
     } catch (e) {
       showToast('Failed to save remark', 'error');
@@ -1573,7 +1686,7 @@ function ResultViewer({ submission, onBack }: { submission: Submission, onBack: 
   useEffect(() => {
     const fetchQuestions = async () => {
       try {
-        const qSnap = await getDocs(collection(db, 'exams', submission.examId, 'questions'));
+        const qSnap = await getDocs(collection(db, 'exams', submission.examId, 'questions')).catch(e => handleFirestoreError(e, OperationType.LIST, `exams/${submission.examId}/questions`));
         setQuestions(qSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question)));
       } catch (error) {
         console.error("Error fetching questions for result:", error);
@@ -1710,8 +1823,12 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
 
   useEffect(() => {
     const fetchQuestions = async () => {
-      const qSnap = await getDocs(collection(db, 'exams', exam.id, 'questions'));
-      setQuestions(qSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question)));
+      try {
+        const qSnap = await getDocs(collection(db, 'exams', exam.id, 'questions')).catch(e => handleFirestoreError(e, OperationType.LIST, `exams/${exam.id}/questions`));
+        setQuestions(qSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Question)));
+      } catch (e) {
+        console.error(e);
+      }
     };
     fetchQuestions();
   }, [exam.id]);
@@ -1745,6 +1862,18 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
       return () => clearInterval(interval);
     }
   }, [isStarted, submission]);
+
+  useEffect(() => {
+    if (isStarted && submission && Object.keys(answers).length > 0) {
+      const saveAnswers = async () => {
+        await updateDoc(doc(db, 'submissions', submission.id), {
+          answers
+        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `submissions/${submission.id}`));
+      };
+      const timeout = setTimeout(saveAnswers, 2000); // Auto-save after 2 seconds of inactivity
+      return () => clearTimeout(timeout);
+    }
+  }, [answers, isStarted, submission]);
   useEffect(() => {
     const handleVisibilityChange = async () => {
       if (document.hidden && isStarted && submission) {
@@ -1752,7 +1881,7 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
         logProctoring('tab-switch', 'User switched tabs or minimized window');
         await updateDoc(doc(db, 'submissions', submission.id), {
           tabSwitchCount: tabSwitchCount + 1
-        });
+        }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `submissions/${submission.id}`));
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -1766,7 +1895,7 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
       timestamp: new Date().toISOString(),
       type,
       evidence
-    });
+    }).catch(e => handleFirestoreError(e, OperationType.WRITE, `submissions/${submission.id}/logs`));
   };
 
   const handleStart = async () => {
@@ -1777,41 +1906,51 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
     if (isBefore(now, new Date(exam.startTime))) return showToast('Exam hasn\'t started yet', 'error');
     if (isAfter(now, new Date(exam.endTime))) return showToast('Exam has ended', 'error');
 
-    const subRef = await addDoc(collection(db, 'submissions'), {
-      examId: exam.id,
-      examTitle: exam.title,
-      examDescription: exam.description,
-      studentUid: auth.currentUser?.uid,
-      studentName: profile.name,
-      status: 'started',
-      startTime: new Date().toISOString(),
-      answers: {},
-      marks: 0,
-      tabSwitchCount: 0,
-      result: 'pending'
-    });
-    
-    setSubmission({ 
-      id: subRef.id, 
-      examId: exam.id, 
-      examTitle: exam.title,
-      examDescription: exam.description,
-      studentUid: auth.currentUser!.uid, 
-      studentName: profile.name, 
-      status: 'started', 
-      startTime: new Date().toISOString(), 
-      answers: {}, 
-      marks: 0, 
-      tabSwitchCount: 0, 
-      result: 'pending' 
-    });
-    setIsStarted(true);
-    
-    // Request fullscreen
+    if (!auth.currentUser) return showToast('You must be logged in to start the exam', 'error');
+
+    let subRef;
     try {
-      document.documentElement.requestFullscreen();
+      subRef = await addDoc(collection(db, 'submissions'), {
+        examId: exam.id,
+        examTitle: exam.title,
+        examDescription: exam.description,
+        studentUid: auth.currentUser.uid,
+        studentName: profile.name,
+        status: 'started',
+        startTime: new Date().toISOString(),
+        answers: {},
+        marks: 0,
+        tabSwitchCount: 0,
+        result: 'pending'
+      });
     } catch (e) {
-      console.error('Fullscreen failed');
+      handleFirestoreError(e, OperationType.CREATE, 'submissions');
+      return;
+    }
+    
+    if (subRef) {
+      setSubmission({ 
+        id: subRef.id, 
+        examId: exam.id, 
+        examTitle: exam.title,
+        examDescription: exam.description,
+        studentUid: auth.currentUser!.uid, 
+        studentName: profile.name, 
+        status: 'started', 
+        startTime: new Date().toISOString(), 
+        answers: {}, 
+        marks: 0, 
+        tabSwitchCount: 0, 
+        result: 'pending' 
+      });
+      setIsStarted(true);
+      
+      // Request fullscreen
+      try {
+        document.documentElement.requestFullscreen();
+      } catch (e) {
+        console.error('Fullscreen failed');
+      }
     }
   };
 
@@ -1821,7 +1960,7 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
       status: 'submitted',
       submitTime: new Date().toISOString(),
       answers
-    });
+    }).catch(e => handleFirestoreError(e, OperationType.UPDATE, `submissions/${submission.id}`));
     if (document.fullscreenElement) document.exitFullscreen();
     showToast('Exam submitted successfully!');
     onFinish();

@@ -1,62 +1,214 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {uid}
+// Fields:
+//   - uid: string (required) - User's unique ID
+//   - email: string (required, email format) - User's email address
+//   - name: string (optional) - User's display name
+//   - role: string (required, enum: ['student', 'teacher']) - User's role
+//
+// Collection: exams
+// Document ID: {examId}
+// Fields:
+//   - title: string (required) - Exam title
+//   - description: string (optional) - Exam description
+//   - startTime: string (required, date-time) - Exam start time
+//   - endTime: string (required, date-time) - Exam end time
+//   - duration: integer (required) - Duration in minutes
+//   - password: string (optional) - Exam password
+//   - creatorUid: string (required) - UID of the teacher who created the exam
+//   - createdAt: timestamp (optional) - Creation timestamp
+//
+// Collection: exams/{examId}/questions
+// Document ID: {questionId}
+// Fields:
+//   - examId: string (required) - Parent exam ID
+//   - type: string (required, enum: ['mcq', 'subjective', 'coding']) - Question type
+//   - text: string (required) - Question text
+//   - options: list (optional) - Options for MCQ
+//   - correctAnswer: string (optional) - Correct answer
+//   - points: integer (required) - Points for the question
+//
+// Collection: submissions
+// Document ID: {submissionId}
+// Fields:
+//   - examId: string (required) - Exam ID
+//   - examTitle: string (optional) - Denormalized exam title
+//   - studentUid: string (required) - UID of the student
+//   - studentName: string (optional) - Student's name
+//   - status: string (required, enum: ['started', 'submitted']) - Submission status
+//   - startTime: string (required, date-time) - Start time
+//   - submitTime: string (optional, date-time) - Submission time
+//   - answers: map (optional) - Student's answers
+//   - marks: integer (optional) - Marks obtained
+//   - result: string (optional) - Pass/Fail status
+//   - remark: string (optional) - Teacher's remark
+//
+// Collection: submissions/{submissionId}/logs
+// Document ID: {logId}
+// Fields:
+//   - submissionId: string (required) - Parent submission ID
+//   - timestamp: string (required, date-time) - Log timestamp
+//   - type: string (required, enum: ['tab-switch', 'face-missing', 'multiple-faces', 'looking-away']) - Log type
+//   - evidence: string (optional) - Evidence (e.g., image URL or count)
+//
+// ===============================================================
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper functions
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
     function isAuthenticated() {
       return request.auth != null;
     }
-    
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
-    }
-    
-    function getUserRole() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
-    }
-    
-    function isTeacher() {
-      return isAuthenticated() && getUserRole() == 'teacher';
     }
 
     function isAdmin() {
       return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "rahulraj000019@gmail.com" && request.auth.token.email_verified == true));
+        (request.auth.token.email == "rahulraj000019@gmail.com" && request.auth.token.email_verified == true);
     }
 
-    // User profiles
-    match /users/{uid} {
+    function isTeacher() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher' || isAdmin());
+    }
+
+    function isStudent() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'student' || isAdmin());
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?.*Z?$");
+    }
+
+    function isRecent(timeStr) {
+      return isValidDateString(timeStr) && 
+             time.date(timeStr) > request.time - duration.value(5, 'm') &&
+             time.date(timeStr) < request.time + duration.value(5, 'm');
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function fieldUnchanged(field) {
+      return !(field in request.resource.data) || request.resource.data[field] == resource.data[field];
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.uid is string &&
+        data.role in ['student', 'teacher'] &&
+        data.email is string &&
+        data.name is string &&
+        (!('portalPassword' in data) || (data.portalPassword is string && data.portalPassword.size() < 100));
+    }
+
+    function isValidExam(data) {
+      return hasOnlyAllowedFields(['title', 'description', 'startTime', 'endTime', 'duration', 'password', 'creatorUid', 'createdAt']) &&
+        data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+        (data.description == null || (data.description is string && data.description.size() < 2000)) &&
+        isValidDateString(data.startTime) &&
+        isValidDateString(data.endTime) &&
+        data.duration is int && data.duration > 0 &&
+        (data.password == null || (data.password is string && data.password.size() < 50)) &&
+        data.creatorUid == request.auth.uid;
+    }
+
+    function isValidQuestion(data) {
+      return hasOnlyAllowedFields(['examId', 'type', 'text', 'options', 'correctAnswer', 'points', 'testCases']) &&
+        data.examId is string &&
+        data.type in ['mcq', 'subjective', 'coding'] &&
+        data.text is string && data.text.size() > 0 && data.text.size() < 5000 &&
+        (data.options == null || data.options is list) &&
+        (data.testCases == null || data.testCases is list) &&
+        data.points is int && data.points >= 0;
+    }
+
+    function isValidSubmission(data) {
+      return hasOnlyAllowedFields(['examId', 'examTitle', 'examDescription', 'studentUid', 'studentName', 'status', 'startTime', 'submitTime', 'answers', 'marks', 'result', 'remark', 'tabSwitchCount', 'gradedQuestions']) &&
+        data.examId is string &&
+        data.studentUid == request.auth.uid &&
+        data.status in ['started', 'submitted'] &&
+        isValidDateString(data.startTime) &&
+        (!('submitTime' in data) || isValidDateString(data.submitTime)) &&
+        (!('gradedQuestions' in data) || data.gradedQuestions is map) &&
+        (!('tabSwitchCount' in data) || data.tabSwitchCount is int);
+    }
+
+    function isValidLog(data) {
+      return hasOnlyAllowedFields(['submissionId', 'timestamp', 'type', 'evidence']) &&
+        data.submissionId is string &&
+        isValidDateString(data.timestamp) &&
+        data.type in ['tab-switch', 'face-missing', 'multiple-faces', 'looking-away', 'snapshot'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
       allow read: if isAuthenticated();
-      // Allow creation for self
-      allow create: if isOwner(uid) && (request.resource.data.role == 'student' || request.resource.data.role == 'teacher');
-      // Allow update for self, but NOT the role field unless admin
-      allow update: if isAdmin() || (isOwner(uid) && request.resource.data.role == resource.data.role);
-      // Admin can do anything
-      allow delete: if isAdmin();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role == resource.data.role || isAdmin());
     }
 
-    // Exams
+    match /test/connection {
+      allow read: if true;
+    }
+
     match /exams/{examId} {
       allow read: if isAuthenticated();
-      allow create: if isTeacher() || isAdmin();
-      allow update, delete: if isAdmin() || (isTeacher() && resource.data.creatorUid == request.auth.uid);
-      
+      allow create: if isTeacher() && isValidExam(request.resource.data);
+      allow update: if isTeacher() && resource.data.creatorUid == request.auth.uid && isValidExam(request.resource.data);
+      allow delete: if isTeacher() && resource.data.creatorUid == request.auth.uid;
+
       match /questions/{questionId} {
         allow read: if isAuthenticated();
-        allow write: if isAdmin() || isTeacher();
+        allow write: if isTeacher() && get(/databases/$(database)/documents/exams/$(examId)).data.creatorUid == request.auth.uid && isValidQuestion(request.resource.data);
       }
     }
 
-    // Submissions
     match /submissions/{submissionId} {
-      allow read: if isAuthenticated() && (resource.data.studentUid == request.auth.uid || isTeacher() || isAdmin());
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated() && (resource.data.studentUid == request.auth.uid || isTeacher() || isAdmin());
-      
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.studentUid || isTeacher());
+      allow create: if isAuthenticated() && isValidSubmission(request.resource.data) && isRecent(request.resource.data.startTime);
+      allow update: if (isOwner(resource.data.studentUid) && 
+                        isValidSubmission(request.resource.data) && 
+                        fieldUnchanged('examId') && 
+                        fieldUnchanged('studentUid') && 
+                        fieldUnchanged('startTime') &&
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answers', 'status', 'submitTime', 'tabSwitchCount'])) || 
+                     (isTeacher() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['marks', 'result', 'remark', 'gradedQuestions']));
+
       match /logs/{logId} {
-        allow read: if isAuthenticated() && (get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid || isTeacher() || isAdmin());
-        allow create: if isAuthenticated();
+        allow read: if isAuthenticated() && (get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid || isTeacher());
+        allow create: if isAuthenticated() && get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid && isValidLog(request.resource.data);
       }
+    }
+
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
     }
   }
 }
