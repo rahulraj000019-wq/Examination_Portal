@@ -232,13 +232,14 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [authLoading, setAuthLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [authSetupError, setAuthSetupError] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const [showProfile, setShowProfile] = useState(false);
-  const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
+  const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' | 'info' } | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
   };
@@ -391,20 +392,33 @@ export default function App() {
 
   const handleForgotPassword = async () => {
     if (!email) return showToast('Please enter your email address first', 'error');
+    
+    // If it's a gmail address, suggest Google recovery
+    if (email.endsWith('@gmail.com')) {
+      showToast('For Gmail accounts, please use Google\'s password recovery or sign in with Google.', 'info');
+    }
+
+    setResetLoading(true);
     try {
       await sendPasswordResetEmail(auth, email);
-      showToast('Password reset email sent! Please check your inbox.', 'success');
+      showToast('Password reset email sent! Please check your inbox (and spam folder).', 'success');
     } catch (error: any) {
       console.error('Reset failed', error);
       let message = 'Failed to send reset email';
       if (error.code === 'auth/user-not-found') {
-        message = 'No account found with this email.';
+        message = 'No account found with this email. If you signed up with Google, you don\'t have a password to reset.';
       } else if (error.code === 'auth/invalid-email') {
         message = 'Invalid email address format.';
+      } else if (error.code === 'auth/operation-not-allowed') {
+        message = 'Email/Password sign-in is not enabled in Firebase Console.';
+      } else if (error.code === 'auth/too-many-requests') {
+        message = 'Too many requests. Please try again later.';
       } else {
         message = error.message || message;
       }
       showToast(message, 'error');
+    } finally {
+      setResetLoading(false);
     }
   };
 
@@ -519,10 +533,14 @@ export default function App() {
                   {authMode === 'login' && (
                     <div className="flex justify-end">
                       <button 
+                        type="button"
                         onClick={handleForgotPassword}
-                        className="text-xs text-indigo-600 font-semibold hover:underline"
+                        disabled={resetLoading}
+                        className={`text-xs font-semibold transition-colors ${
+                          resetLoading ? 'text-slate-400 cursor-not-allowed' : 'text-indigo-600 hover:underline hover:text-indigo-700'
+                        }`}
                       >
-                        Forgot Password?
+                        {resetLoading ? 'Sending...' : 'Forgot Password?'}
                       </button>
                     </div>
                   )}
@@ -720,10 +738,16 @@ export default function App() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 50 }}
           className={`fixed bottom-8 right-8 px-6 py-3 rounded-xl shadow-2xl z-[100] flex items-center gap-3 border ${
-            toast.type === 'error' ? 'bg-red-50 border-red-100 text-red-700' : 'bg-emerald-50 border-emerald-100 text-emerald-700'
+            toast.type === 'error' ? 'bg-red-50 border-red-100 text-red-700' : 
+            toast.type === 'info' ? 'bg-indigo-50 border-indigo-100 text-indigo-700' :
+            'bg-emerald-50 border-emerald-100 text-emerald-700'
           }`}
         >
-          <div className={`w-2 h-2 rounded-full ${toast.type === 'error' ? 'bg-red-500' : 'bg-emerald-500'}`} />
+          <div className={`w-2 h-2 rounded-full ${
+            toast.type === 'error' ? 'bg-red-500' : 
+            toast.type === 'info' ? 'bg-indigo-500' :
+            'bg-emerald-500'
+          }`} />
           <span className="font-medium">{toast.message}</span>
         </motion.div>
       )}
@@ -1817,6 +1841,7 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
   const [fullscreenAlert, setFullscreenAlert] = useState(false);
   const [tabSwitchCount, setTabSwitchCount] = useState(0);
   const [snapshotInterval, setSnapshotInterval] = useState<NodeJS.Timeout | null>(null);
+  const [startLoading, setStartLoading] = useState(false);
   
   const webcamRef = useRef<Webcam>(null);
   const faceMeshRef = useRef<FaceMesh | null>(null);
@@ -1899,6 +1924,8 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
   };
 
   const handleStart = async () => {
+    if (startLoading) return;
+    
     if (exam.password && password !== exam.password) return showToast('Incorrect password', 'error');
     
     // Check if within time
@@ -1908,49 +1935,55 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
 
     if (!auth.currentUser) return showToast('You must be logged in to start the exam', 'error');
 
-    let subRef;
+    setStartLoading(true);
     try {
-      subRef = await addDoc(collection(db, 'submissions'), {
+      const startTime = new Date().toISOString();
+      const submissionData = {
         examId: exam.id,
         examTitle: exam.title,
-        examDescription: exam.description,
+        examDescription: exam.description || '',
         studentUid: auth.currentUser.uid,
-        studentName: profile.name,
-        status: 'started',
-        startTime: new Date().toISOString(),
+        studentName: profile.name || 'Anonymous',
+        status: 'started' as const,
+        startTime: startTime,
         answers: {},
         marks: 0,
         tabSwitchCount: 0,
-        result: 'pending'
-      });
-    } catch (e) {
-      handleFirestoreError(e, OperationType.CREATE, 'submissions');
-      return;
-    }
-    
-    if (subRef) {
-      setSubmission({ 
-        id: subRef.id, 
-        examId: exam.id, 
-        examTitle: exam.title,
-        examDescription: exam.description,
-        studentUid: auth.currentUser!.uid, 
-        studentName: profile.name, 
-        status: 'started', 
-        startTime: new Date().toISOString(), 
-        answers: {}, 
-        marks: 0, 
-        tabSwitchCount: 0, 
-        result: 'pending' 
-      });
-      setIsStarted(true);
+        result: 'pending' as const,
+        remark: '',
+        gradedQuestions: {}
+      };
+
+      console.log('Attempting to create submission:', submissionData);
+      const subRef = await addDoc(collection(db, 'submissions'), submissionData)
+        .catch(e => handleFirestoreError(e, OperationType.CREATE, 'submissions'));
       
-      // Request fullscreen
-      try {
-        document.documentElement.requestFullscreen();
-      } catch (e) {
-        console.error('Fullscreen failed');
+      if (subRef) {
+        setSubmission({ 
+          id: subRef.id, 
+          ...submissionData
+        });
+        setIsStarted(true);
+        
+        // Request fullscreen
+        try {
+          if (document.documentElement.requestFullscreen) {
+            await document.documentElement.requestFullscreen();
+          }
+        } catch (e) {
+          console.error('Fullscreen failed:', e);
+        }
       }
+    } catch (e: any) {
+      console.error('Start exam failed:', e);
+      const errorMsg = e?.message || String(e);
+      if (errorMsg.includes('permission-denied') || errorMsg.includes('insufficient permissions')) {
+        showToast('Failed to start: Security check failed. Please ensure your system clock is correct.', 'error');
+      } else {
+        showToast('Failed to start exam. Please try again.', 'error');
+      }
+    } finally {
+      setStartLoading(false);
     }
   };
 
@@ -2004,7 +2037,13 @@ function ExamRoom({ exam, profile, onFinish, showToast }: { exam: Exam, profile:
               <AlertTriangle size={16} />
               <span>Webcam and Fullscreen are required for this exam.</span>
             </div>
-            <Button className="w-full py-4" onClick={handleStart}>Start Assessment</Button>
+            <Button 
+              className="w-full py-4" 
+              onClick={handleStart}
+              disabled={startLoading}
+            >
+              {startLoading ? 'Initializing...' : 'Start Assessment'}
+            </Button>
           </div>
         </Card>
       </div>

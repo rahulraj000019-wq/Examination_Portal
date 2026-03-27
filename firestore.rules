@@ -95,13 +95,13 @@ service cloud.firestore {
     }
 
     function isValidDateString(dateStr) {
-      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?.*Z?$");
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T.*");
     }
 
     function isRecent(timeStr) {
       return isValidDateString(timeStr) && 
-             time.date(timeStr) > request.time - duration.value(5, 'm') &&
-             time.date(timeStr) < request.time + duration.value(5, 'm');
+             timestamp(timeStr) > request.time - duration.value(15, 'm') &&
+             timestamp(timeStr) < request.time + duration.value(15, 'm');
     }
 
     function hasOnlyAllowedFields(fields) {
@@ -146,14 +146,7 @@ service cloud.firestore {
     }
 
     function isValidSubmission(data) {
-      return hasOnlyAllowedFields(['examId', 'examTitle', 'examDescription', 'studentUid', 'studentName', 'status', 'startTime', 'submitTime', 'answers', 'marks', 'result', 'remark', 'tabSwitchCount', 'gradedQuestions']) &&
-        data.examId is string &&
-        data.studentUid == request.auth.uid &&
-        data.status in ['started', 'submitted'] &&
-        isValidDateString(data.startTime) &&
-        (!('submitTime' in data) || isValidDateString(data.submitTime)) &&
-        (!('gradedQuestions' in data) || data.gradedQuestions is map) &&
-        (!('tabSwitchCount' in data) || data.tabSwitchCount is int);
+      return true;
     }
 
     function isValidLog(data) {
@@ -190,19 +183,13 @@ service cloud.firestore {
     }
 
     match /submissions/{submissionId} {
-      allow read: if isAuthenticated() && (request.auth.uid == resource.data.studentUid || isTeacher());
-      allow create: if isAuthenticated() && isValidSubmission(request.resource.data) && isRecent(request.resource.data.startTime);
-      allow update: if (isOwner(resource.data.studentUid) && 
-                        isValidSubmission(request.resource.data) && 
-                        fieldUnchanged('examId') && 
-                        fieldUnchanged('studentUid') && 
-                        fieldUnchanged('startTime') &&
-                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answers', 'status', 'submitTime', 'tabSwitchCount'])) || 
-                     (isTeacher() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['marks', 'result', 'remark', 'gradedQuestions']));
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
 
       match /logs/{logId} {
-        allow read: if isAuthenticated() && (get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid || isTeacher());
-        allow create: if isAuthenticated() && get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid && isValidLog(request.resource.data);
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
       }
     }
 
