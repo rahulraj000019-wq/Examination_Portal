@@ -758,7 +758,7 @@ export default function App() {
           <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100">
             <Shield className="text-white" size={24} />
           </div>
-          <span className="text-xl font-bold text-slate-900">ExamPortal AI</span>
+          <span className="text-xl font-bold text-slate-900">examportal ai</span>
         </div>
         
         <div className="flex items-center gap-6">

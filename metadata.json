@@ -1,5 +1,5 @@
 {
-  "name": "AI-Based Examination Portal",
+  "name": "examportal ai",
   "description": "A high-integrity web-based platform for remote academic and technical assessments with AI proctoring and multi-language coding support.",
   "requestFramePermissions": [
     "camera",
